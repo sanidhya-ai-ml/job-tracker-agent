@@ -1,0 +1,201 @@
+{
+  "name": "Job Tracker — Main (Gmail → Extract → Notion)",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [{ "mode": "everyX", "value": 15, "unit": "minutes" }]
+        },
+        "filters": {
+          "labelIds": ["Label_job", "Label_application"],
+          "readStatus": "unread"
+        },
+        "options": {
+          "dataPropertyAttachmentsPrefixName": "attachment_"
+        }
+      },
+      "id": "gmail-trigger",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "credentials": { "gmailOAuth2": { "id": "1", "name": "Gmail account" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FASTAPI_URL }}/extract",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "email_id": "={{ $json.id }}",
+          "subject": "={{ $json.subject }}",
+          "sender": "={{ $json.from }}",
+          "body": "={{ $json.text }}",
+          "received_at": "={{ $json.date }}"
+        },
+        "options": {
+          "timeout": 30000,
+          "response": { "response": { "responseFormat": "json" } }
+        }
+      },
+      "id": "http-extract",
+      "name": "POST /extract",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FASTAPI_URL }}/webhook/n8n",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "workflow_id": "job_tracker_main",
+          "execution_id": "={{ $execution.id }}",
+          "event": "email_processed",
+          "data": {
+            "email_id": "={{ $('Gmail Trigger').item.json.id }}",
+            "success": "={{ $json.success }}"
+          }
+        }
+      },
+      "id": "http-log",
+      "name": "Log to /webhook/n8n",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [680, 160]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.success }}",
+              "operation": "equal",
+              "value2": "true"
+            }
+          ]
+        }
+      },
+      "id": "if-success",
+      "name": "Extraction Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.application.status }}",
+              "operation": "notEqual",
+              "value2": "needs_review"
+            }
+          ]
+        }
+      },
+      "id": "if-not-review",
+      "name": "Route by Status",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [900, 240]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "databaseId": "={{ $env.NOTION_DATABASE_ID }}",
+        "matchingColumns": ["Email ID"],
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Company":       "={{ $json.application.company_name }}",
+            "Job Title":     "={{ $json.application.job_title }}",
+            "Status":        "={{ $json.application.status }}",
+            "Date Applied":  "={{ $json.application.date_applied }}",
+            "Next Action":   "={{ $json.application.next_action }}",
+            "Recruiter":     "={{ $json.application.recruiter_name }}",
+            "Salary Range":  "={{ $json.application.salary_range }}",
+            "Email ID":      "={{ $json.application.source_email_id }}"
+          }
+        }
+      },
+      "id": "notion-upsert",
+      "name": "Notion Upsert",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [1120, 180],
+      "credentials": { "notionApi": { "id": "2", "name": "Notion account" } }
+    },
+    {
+      "parameters": {
+        "operation": "appendAfter",
+        "blockId": "={{ $env.NOTION_REVIEW_PAGE_ID }}",
+        "blockUi": {
+          "blockValues": [
+            {
+              "type": "to_do",
+              "textContent": "Review: {{ $json.application.company_name }} — {{ $json.application.job_title }} | Email: {{ $json.application.source_email_id }}"
+            }
+          ]
+        }
+      },
+      "id": "notion-review",
+      "name": "Notion Manual Review",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [1120, 380],
+      "credentials": { "notionApi": { "id": "2", "name": "Notion account" } }
+    },
+    {
+      "parameters": {
+        "operation": "appendAfter",
+        "blockId": "={{ $env.NOTION_REVIEW_PAGE_ID }}",
+        "blockUi": {
+          "blockValues": [
+            {
+              "type": "to_do",
+              "textContent": "EXTRACTION FAILED | Email ID: {{ $('Gmail Trigger').item.json.id }} | Error: {{ $json.error }}"
+            }
+          ]
+        }
+      },
+      "id": "notion-error",
+      "name": "Notion Error Log",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [900, 420],
+      "credentials": { "notionApi": { "id": "2", "name": "Notion account" } }
+    }
+  ],
+  "connections": {
+    "Gmail Trigger":         { "main": [[{ "node": "POST /extract",           "type": "main", "index": 0 }]] },
+    "POST /extract":         { "main": [[{ "node": "Log to /webhook/n8n",     "type": "main", "index": 0 },
+                                         { "node": "Extraction Succeeded?",   "type": "main", "index": 0 }]] },
+    "Extraction Succeeded?": {
+      "main": [
+        [{ "node": "Route by Status",     "type": "main", "index": 0 }],
+        [{ "node": "Notion Error Log",    "type": "main", "index": 0 }]
+      ]
+    },
+    "Route by Status": {
+      "main": [
+        [{ "node": "Notion Upsert",       "type": "main", "index": 0 }],
+        [{ "node": "Notion Manual Review","type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": ["job-tracker", "gmail", "notion", "ai"],
+  "triggerCount": 0,
+  "updatedAt": "2026-04-21T00:00:00.000Z",
+  "versionId": "1"
+}

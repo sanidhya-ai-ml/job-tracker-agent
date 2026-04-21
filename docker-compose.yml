@@ -1,0 +1,75 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobtracker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobtracker}
+      POSTGRES_DB: ${POSTGRES_DB:-jobtracker}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobtracker}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  fastapi:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-jobtracker}:${POSTGRES_PASSWORD:-jobtracker}@postgres:5432/${POSTGRES_DB:-jobtracker}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      NOTION_TOKEN: ${NOTION_TOKEN}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
+      NOTION_REVIEW_PAGE_ID: ${NOTION_REVIEW_PAGE_ID}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD:-changeme}
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://${N8N_HOST:-localhost}:5678/
+      FASTAPI_URL: http://fastapi:8000
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
+      NOTION_REVIEW_PAGE_ID: ${NOTION_REVIEW_PAGE_ID}
+      GENERIC_TIMEZONE: Asia/Kolkata
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/home/node/.n8n/workflows:ro
+    depends_on:
+      fastapi:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  postgres_data:
+  n8n_data:

@@ -1,0 +1,75 @@
+{
+  "name": "Job Tracker — Daily Digest (Slack)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Weekdays 8am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.FASTAPI_URL }}/stats",
+        "options": {
+          "response": { "response": { "responseFormat": "json" } }
+        }
+      },
+      "id": "http-stats",
+      "name": "GET /stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const s = $input.first().json;\n\nconst responseRate = (s.response_rate * 100).toFixed(1);\nconst offerRate    = (s.offer_rate    * 100).toFixed(1);\n\nconst blocks = [\n  {\n    type: 'header',\n    text: { type: 'plain_text', text: '📋 Job Search Daily Digest', emoji: true }\n  },\n  {\n    type: 'section',\n    text: {\n      type: 'mrkdwn',\n      text: `*Today's snapshot* — ${new Date().toDateString()}`\n    }\n  },\n  { type: 'divider' },\n  {\n    type: 'section',\n    fields: [\n      { type: 'mrkdwn', text: `*📨 Applied*\\n${s.applied}` },\n      { type: 'mrkdwn', text: `*🎤 Interview*\\n${s.interview}` },\n      { type: 'mrkdwn', text: `*🎉 Offer*\\n${s.offer}` },\n      { type: 'mrkdwn', text: `*❌ Rejected*\\n${s.rejected}` }\n    ]\n  },\n  {\n    type: 'section',\n    fields: [\n      { type: 'mrkdwn', text: `*📊 Response Rate*\\n${responseRate}%` },\n      { type: 'mrkdwn', text: `*✅ Offer Rate*\\n${offerRate}%` }\n    ]\n  },\n  s.needs_review > 0\n    ? {\n        type: 'section',\n        text: {\n          type: 'mrkdwn',\n          text: `⚠️ *${s.needs_review} email(s) need manual review* — check your Notion review page.`\n        }\n      }\n    : { type: 'divider' },\n  {\n    type: 'context',\n    elements: [{ type: 'mrkdwn', text: 'Powered by Job Tracker Agent 🤖' }]\n  }\n];\n\nreturn [{ json: { blocks } }];\n"
+      },
+      "id": "format-slack",
+      "name": "Format Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#job-search",
+        "blocksUi": "={{ JSON.stringify($json.blocks) }}",
+        "otherOptions": {
+          "unfurl_links": false
+        }
+      },
+      "id": "slack-post",
+      "name": "Post to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [900, 300],
+      "credentials": { "slackApi": { "id": "3", "name": "Slack account" } }
+    }
+  ],
+  "connections": {
+    "Weekdays 8am":       { "main": [[{ "node": "GET /stats",            "type": "main", "index": 0 }]] },
+    "GET /stats":         { "main": [[{ "node": "Format Slack Message",  "type": "main", "index": 0 }]] },
+    "Format Slack Message": { "main": [[{ "node": "Post to Slack",       "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "staticData": null,
+  "tags": ["job-tracker", "slack", "digest"],
+  "triggerCount": 0,
+  "updatedAt": "2026-04-21T00:00:00.000Z",
+  "versionId": "1"
+}
