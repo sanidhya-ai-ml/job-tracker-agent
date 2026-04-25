@@ -132,6 +132,14 @@ class NotionClient:
 
 _notion_client: NotionClient | None = None
 
+_PLACEHOLDERS = {"secret_...", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "", "secret_"}
+
+
+def is_notion_configured() -> bool:
+    token = os.environ.get("NOTION_TOKEN", "")
+    db_id = os.environ.get("NOTION_DATABASE_ID", "")
+    return token not in _PLACEHOLDERS and db_id not in _PLACEHOLDERS
+
 
 def get_notion_client() -> NotionClient:
     global _notion_client

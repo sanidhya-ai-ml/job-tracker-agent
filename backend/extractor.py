@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import date
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from models import ApplicationStatus, JobApplication
 
 logger = logging.getLogger(__name__)
 
-PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "extract_job_email.txt"
+PROMPT_PATH = Path(__file__).parent / "prompts" / "extract_job_email.txt"
 SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
 
 _client: AsyncOpenAI | None = None
@@ -20,7 +21,11 @@ _client: AsyncOpenAI | None = None
 def get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
-        _client = AsyncOpenAI()
+        # Gemini via OpenAI-compatible endpoint — no extra package needed
+        _client = AsyncOpenAI(
+            api_key=os.environ["GEMINI_API_KEY"],
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
     return _client
 
 
@@ -30,7 +35,7 @@ async def extract_job_application(
     sender: str,
     body: str,
 ) -> JobApplication:
-    """Call OpenAI with structured JSON output and return a JobApplication.
+    """Call Gemini via OpenAI-compatible endpoint and return a JobApplication.
 
     Falls back to status=needs_review when confidence < 0.7 or parsing fails.
     """
@@ -41,7 +46,7 @@ From: {sender}
 
     try:
         response = await get_client().chat.completions.create(
-            model="gpt-4o",
+            model="gemini-2.5-flash",
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -91,5 +96,5 @@ From: {sender}
             source_email_id=email_id,
         )
     except Exception as exc:
-        logger.exception("OpenAI API error for email %s: %s", email_id, exc)
+        logger.exception("Gemini API error for email %s: %s", email_id, exc)
         raise

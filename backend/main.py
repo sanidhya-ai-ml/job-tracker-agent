@@ -18,7 +18,7 @@ from models import (
     FunnelStats,
     N8nWebhookPayload,
 )
-from notion_client import get_notion_client
+from notion_client import get_notion_client, is_notion_configured
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
 logger = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ async def health() -> dict:
 
 @app.post("/extract", response_model=ExtractionResponse, status_code=status.HTTP_200_OK)
 async def extract(req: ExtractionRequest) -> ExtractionResponse:
-    """Receive a raw email, run LLM extraction, upsert to Notion, persist to DB."""
+    """Receive a raw email, run LLM extraction, persist to DB, optionally sync to Notion."""
     try:
         application = await extract_job_application(
             email_id=req.email_id,
@@ -112,25 +112,9 @@ async def extract(req: ExtractionRequest) -> ExtractionResponse:
         logger.exception("Extraction failed for email %s", req.email_id)
         raise HTTPException(status_code=502, detail=f"LLM extraction error: {exc}") from exc
 
-    notion = get_notion_client()
     routed_to_review = application.status == ApplicationStatus.needs_review
 
-    try:
-        if routed_to_review:
-            await notion.route_to_manual_review(application, reason="Low confidence or ambiguous email")
-        else:
-            page_id = await notion.upsert_application(application)
-            application.notion_page_id = page_id
-    except Exception as exc:
-        logger.exception("Notion sync failed for email %s", req.email_id)
-        # Don't fail the whole request — return result but surface the warning
-        return ExtractionResponse(
-            success=False,
-            application=application,
-            error=f"Notion sync failed: {exc}",
-            routed_to_review=routed_to_review,
-        )
-
+    # 1. Always save to DB first
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -157,15 +141,52 @@ async def extract(req: ExtractionRequest) -> ExtractionResponse:
             application.notion_page_id,
         )
 
+    # 2. Notion sync — optional, skip gracefully if not configured
+    notion_warning: str | None = None
+    if is_notion_configured():
+        try:
+            notion = get_notion_client()
+            if routed_to_review:
+                await notion.route_to_manual_review(application, reason="Low confidence or ambiguous email")
+            else:
+                page_id = await notion.upsert_application(application)
+                application.notion_page_id = page_id
+        except Exception as exc:
+            logger.warning("Notion sync failed for email %s: %s", req.email_id, exc)
+            notion_warning = f"Notion sync failed: {exc}"
+    else:
+        logger.info("Notion not configured — skipping sync for email %s", req.email_id)
+
     return ExtractionResponse(
         success=True,
         application=application,
+        error=notion_warning,
         routed_to_review=routed_to_review,
     )
 
 
-@app.post("/webhook/n8n", status_code=status.HTTP_204_NO_CONTENT)
-async def n8n_webhook(payload: N8nWebhookPayload) -> None:
+@app.get("/applications")
+async def list_applications(limit: int = 50, offset: int = 0) -> list[dict]:
+    """List all tracked job applications from the database."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, company_name, job_title, status, date_applied, next_action,
+                   recruiter_name, salary_range, confidence, source_email_id,
+                   notion_page_id, created_at, updated_at
+            FROM job_applications
+            ORDER BY created_at DESC
+            LIMIT $1 OFFSET $2
+            """,
+            limit,
+            offset,
+        )
+    return [dict(r) for r in rows]
+
+
+@app.post("/webhook/n8n", status_code=status.HTTP_200_OK)
+async def n8n_webhook(payload: N8nWebhookPayload) -> dict:
     """Log n8n execution events for observability."""
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -180,6 +201,7 @@ async def n8n_webhook(payload: N8nWebhookPayload) -> None:
             payload.data,
         )
     logger.info("n8n event logged: %s", payload.event)
+    return {"status": "logged", "event": payload.event}
 
 
 @app.get("/stats", response_model=FunnelStats)

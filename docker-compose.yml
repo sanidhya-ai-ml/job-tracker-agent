@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
 
   postgres:
@@ -28,10 +26,12 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-jobtracker}:${POSTGRES_PASSWORD:-jobtracker}@postgres:5432/${POSTGRES_DB:-jobtracker}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      NOTION_TOKEN: ${NOTION_TOKEN}
-      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID}
-      NOTION_REVIEW_PAGE_ID: ${NOTION_REVIEW_PAGE_ID}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      NOTION_TOKEN: ${NOTION_TOKEN:-secret_...}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID:-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+      NOTION_REVIEW_PAGE_ID: ${NOTION_REVIEW_PAGE_ID:-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+    volumes:
+      - ./prompts:/app/prompts:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,6 +51,7 @@ services:
       N8N_BASIC_AUTH_USER: ${N8N_USER:-admin}
       N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD:-changeme}
       N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_LICENSE_ACTIVATION_KEY: ${N8N_LICENSE_ACTIVATION_KEY}
       N8N_PORT: 5678
       N8N_PROTOCOL: http
       WEBHOOK_URL: http://${N8N_HOST:-localhost}:5678/
