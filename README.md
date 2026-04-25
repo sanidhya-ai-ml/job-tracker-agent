@@ -1,302 +1,234 @@
-# Job Tracker Agent
+# job-tracker-agent
 
-An AI-powered job application tracker that monitors Gmail, extracts structured data with GPT-4o, syncs to Notion, and delivers a daily Slack digest — fully automated via n8n.
+An AI-powered job application tracker that monitors your Gmail, extracts structured data with **Gemini 2.5 Flash**, persists it to PostgreSQL, optionally syncs to Notion, and delivers a daily Slack digest — all automated via n8n. No manual data entry needed.
 
-## Architecture
-
-```mermaid
-flowchart LR
-    subgraph Gmail
-        G[📧 New Email\nlabeled job/application]
-    end
-
-    subgraph n8n["n8n Orchestrator (port 5678)"]
-        T[Gmail Trigger\nevery 15 min]
-        IF1{Extraction\nSucceeded?}
-        IF2{Status ==\nneeds_review?}
-        CRON[⏰ Cron\nWeekdays 8am]
-        FMT[Format\nSlack Block Kit]
-    end
-
-    subgraph FastAPI["FastAPI Backend (port 8000)"]
-        EX[POST /extract\nOpenAI GPT-4o]
-        WH[POST /webhook/n8n\nEvent Logger]
-        ST[GET /stats\nFunnel Counts]
-    end
-
-    subgraph Storage
-        PG[(PostgreSQL\nport 5432)]
-        NO[📓 Notion DB\nJob Applications]
-        NR[📋 Notion Page\nManual Review]
-    end
-
-    subgraph Slack
-        SL[#job-search\nDaily Digest]
-    end
-
-    G --> T --> EX
-    EX -->|JobApplication JSON| IF1
-    IF1 -->|success| IF2
-    IF1 -->|fail| NR
-    IF2 -->|normal| NO
-    IF2 -->|needs_review| NR
-    EX --> PG
-    EX --> WH --> PG
-    CRON --> ST --> PG
-    ST --> FMT --> SL
-```
+## How It Works
 
 ```
-Gmail ──► n8n (poll) ──► POST /extract ──► GPT-4o structured output
-                              │
-                    ┌─────────┴──────────┐
-                    ▼                    ▼
-             Notion Upsert        Manual Review Page
-             (Applied/Interview   (needs_review / error)
-              /Offer/Rejected)
-                    │
-                   PostgreSQL (source of truth)
-
-Cron (8am weekdays) ──► GET /stats ──► Slack Block Kit digest
+Gmail ──► n8n (poll every 5 min)
+               │
+               ▼
+        POST /extract  (FastAPI)
+               │
+               ▼
+       Gemini 2.5 Flash (LLM)
+        extracts structured JSON
+               │
+         confidence check
+         ├── ≥ 0.7 → PostgreSQL + Notion (if configured)
+         └── < 0.7 → Manual Review (Notion page or flag in DB)
+               │
+        n8n daily cron (8am IST)
+               │
+               ▼
+        GET /stats ──► Slack digest
 ```
 
 ## Tech Stack
 
 | Layer | Technology |
-|---|---|
-| Orchestration | n8n (self-hosted) |
-| LLM Extraction | OpenAI GPT-4o, structured JSON output |
-| Backend | FastAPI 0.111, Python 3.11, asyncpg |
+|-------|-----------|
+| Workflow Automation | n8n (self-hosted) |
+| LLM Extraction | Gemini 2.5 Flash via OpenAI-compatible endpoint |
+| Backend API | FastAPI 0.111 + Python 3.11 + asyncpg |
 | Data Models | Pydantic v2 |
 | Database | PostgreSQL 16 |
-| Knowledge Base | Notion API v1 |
-| Notifications | Slack Block Kit |
-| Infrastructure | Docker Compose |
+| Notion Sync | Notion API v1 (optional) |
+| Notifications | Slack Block Kit (optional) |
+| Infrastructure | Docker Compose (multi-stage build) |
 
-## Environment Variables
+## API Endpoints
 
-| Variable | Required | Description |
-|---|---|---|
-| `OPENAI_API_KEY` | ✅ | OpenAI API key |
-| `NOTION_TOKEN` | ✅ | Notion integration secret token |
-| `NOTION_DATABASE_ID` | ✅ | ID of your "Job Applications" Notion database |
-| `NOTION_REVIEW_PAGE_ID` | ✅ | ID of your "Manual Review" Notion page |
-| `SLACK_BOT_TOKEN` | ✅ | Slack bot OAuth token |
-| `SLACK_CHANNEL` | ✅ | Slack channel (e.g. `#job-search`) |
-| `POSTGRES_USER` | ✅ | PostgreSQL username |
-| `POSTGRES_PASSWORD` | ✅ | PostgreSQL password |
-| `POSTGRES_DB` | ✅ | PostgreSQL database name |
-| `N8N_USER` | ✅ | n8n basic auth username |
-| `N8N_PASSWORD` | ✅ | n8n basic auth password |
-| `N8N_HOST` | optional | Hostname for n8n (default: `localhost`) |
-| `FASTAPI_URL` | optional | URL n8n uses to reach FastAPI (default: `http://fastapi:8000`) |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Health check |
+| `POST` | `/extract` | Extract job data from raw email via Gemini |
+| `GET` | `/applications` | List all tracked applications from PostgreSQL |
+| `GET` | `/stats` | Funnel counts (applied / interview / offer / rejected) |
+| `POST` | `/webhook/n8n` | n8n execution event logger |
 
-## Setup Guide
+## Quick Start
 
 ### Prerequisites
 
 - Docker Desktop ≥ 24
-- `make` (or run commands manually)
-- A Gmail account with labels `job` and `application` configured
-- A Notion integration with access to your database
-- A Slack app with `chat:write` scope
+- A Gmail account
+- Gemini API key — [get one free](https://aistudio.google.com/app/apikey)
 
 ### Step 1 — Clone and configure
 
 ```bash
-git clone https://github.com/your-username/job-tracker-agent.git
+git clone https://github.com/sanidhya-ai-ml/job-tracker-agent.git
 cd job-tracker-agent
 cp .env.example .env
-# Edit .env and fill in all required values
+```
+
+Edit `.env` — only `GEMINI_API_KEY` is required to start:
+
+```env
+GEMINI_API_KEY=AIza...          # required
+NOTION_TOKEN=secret_...         # optional — skip to use DB only
+SLACK_BOT_TOKEN=xoxb-...        # optional — skip if no Slack
 ```
 
 ### Step 2 — Start all services
 
 ```bash
-make dev
+docker compose up --build -d
 ```
 
-This starts:
-- **PostgreSQL** on `localhost:5432`
-- **FastAPI** on `localhost:8000` (API docs at `/docs`)
-- **n8n** on `localhost:5678`
+Services started:
+- **PostgreSQL** → `localhost:5432`
+- **FastAPI** → `localhost:8000` (Swagger UI at `/docs`)
+- **n8n** → `localhost:5678` (login: `admin` / `changeme_in_prod`)
 
-### Step 3 — Configure n8n credentials
+### Step 3 — Import n8n workflows
 
-Open [http://localhost:5678](http://localhost:5678) and add credentials for:
+1. Open [http://localhost:5678](http://localhost:5678)
+2. Click **+** → **Workflow** → **Import from file**
+3. Import `workflows/job_tracker_main.json`
+4. Import `workflows/daily_digest.json`
 
-1. **Gmail OAuth2** — Settings → Credentials → New → Gmail OAuth2
-2. **Notion API** — Settings → Credentials → New → Notion API (paste your integration token)
-3. **Slack API** — Settings → Credentials → New → Slack API (paste your bot token)
+### Step 4 — Connect Gmail in n8n
 
-### Step 4 — Import workflows
+1. Open the `job_tracker_main` workflow
+2. Click the **Gmail Trigger** node → **Create new credential**
+3. You'll need a Google OAuth2 Client ID + Secret:
+   - Go to [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials
+   - Create OAuth 2.0 Client ID (Web application)
+   - Add redirect URI: `http://localhost:5678/rest/oauth2-credential/callback`
+   - Copy Client ID and Client Secret into n8n
+4. Click **Sign in with Google** → authorize with your Gmail account
+5. **Save** the workflow → click **Publish** to activate
+
+### Step 5 — Test it
+
+Send yourself a job-related email, wait up to 5 minutes, then check:
 
 ```bash
-make import-workflows
+curl http://localhost:8000/applications
 ```
 
-Then activate both workflows in the n8n UI (toggle the switch on each workflow card).
+Or use the Swagger UI at [http://localhost:8000/docs](http://localhost:8000/docs).
 
-### Step 5 — Label emails in Gmail
+## Test via Swagger UI
 
-Create Gmail labels named `job` and `application`. Apply them to any job-related emails. The trigger polls every 15 minutes for unread emails with these labels.
+Open [http://localhost:8000/docs](http://localhost:8000/docs) → **POST /extract** → **Try it out** → paste:
 
-### Step 6 — Set up Notion
-
-Create a database in Notion with these properties:
-
-| Property | Type |
-|---|---|
-| Company | Title |
-| Job Title | Text |
-| Status | Select (Applied, Interview, Offer, Rejected, needs_review) |
-| Date Applied | Date |
-| Next Action | Text |
-| Recruiter | Text |
-| Salary Range | Text |
-| Email ID | Text |
-
-Share the database with your integration. Copy the database ID from the URL and set `NOTION_DATABASE_ID` in `.env`.
-
-Create a separate "Manual Review" page, share it with the integration, and set `NOTION_REVIEW_PAGE_ID`.
-
-## API Reference
-
-### `POST /extract`
-
-Receives a raw email and returns structured job application data.
-
-**Request:**
 ```json
 {
-  "email_id": "18f3a2b1c4d5e6f7",
-  "subject": "Your application to Stripe",
-  "sender": "recruiting@stripe.com",
-  "body": "Hi Sanidhya, we received your application for..."
+  "email_id": "test-001",
+  "subject": "Your application to Google - Software Engineer",
+  "sender": "recruiting@google.com",
+  "body": "Hi Sanidhya, thank you for applying for the Software Engineer role at Google. We will review your application and get back to you within 2 weeks."
 }
 ```
 
-**Response:**
+Expected response:
 ```json
 {
   "success": true,
   "application": {
-    "company_name": "Stripe",
-    "job_title": "ML Engineer",
+    "company_name": "Google",
+    "job_title": "Software Engineer",
     "status": "Applied",
-    "date_applied": "2026-04-21",
-    "next_action": "Wait for recruiter follow-up",
-    "recruiter_name": null,
-    "salary_range": null,
-    "confidence": 0.91
+    "confidence": 0.95,
+    "next_action": "Wait for further communication within 2 weeks"
   },
   "routed_to_review": false
 }
 ```
 
-### `GET /stats`
+## Environment Variables
 
-Returns funnel counts for the Slack digest.
-
-```json
-{
-  "applied": 42,
-  "interview": 11,
-  "offer": 2,
-  "rejected": 18,
-  "needs_review": 3,
-  "total": 76,
-  "response_rate": 0.3095,
-  "offer_rate": 0.0476
-}
-```
-
-### `POST /webhook/n8n`
-
-Receives execution event logs from n8n. Used for observability.
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GEMINI_API_KEY` | ✅ | Google AI Studio API key |
+| `POSTGRES_USER` | ✅ | PostgreSQL username (default: `jobtracker`) |
+| `POSTGRES_PASSWORD` | ✅ | PostgreSQL password |
+| `POSTGRES_DB` | ✅ | PostgreSQL database name (default: `jobtracker`) |
+| `N8N_USER` | ✅ | n8n login username (default: `admin`) |
+| `N8N_PASSWORD` | ✅ | n8n login password |
+| `NOTION_TOKEN` | optional | Notion integration secret — skipped if placeholder |
+| `NOTION_DATABASE_ID` | optional | Notion Job Applications database ID |
+| `NOTION_REVIEW_PAGE_ID` | optional | Notion Manual Review page ID |
+| `SLACK_BOT_TOKEN` | optional | Slack bot token for daily digest |
+| `SLACK_CHANNEL` | optional | Slack channel (e.g. `#job-search`) |
+| `N8N_LICENSE_ACTIVATION_KEY` | optional | n8n license key |
 
 ## How LLM Extraction Works
 
-```
-Email (subject + body)
-        │
-        ▼
-  System prompt (prompts/extract_job_email.txt)
-        │
-        ▼
-  GPT-4o (response_format: json_object, temp=0.1)
-        │
-        ▼
-  Parse JSON → validate with Pydantic
-        │
-  confidence < 0.7?
-   ├── YES → status = needs_review → Notion Manual Review page
-   └── NO  → upsert to Notion DB + PostgreSQL
-```
+The system prompt (`prompts/extract_job_email.txt`) instructs Gemini to extract:
 
-The prompt instructs the model to be conservative with confidence scores. Anything ambiguous (newsletters, generic HR emails, promotional content) gets routed to manual review rather than silently creating a bad record.
+| Field | Description |
+|-------|-------------|
+| `company_name` | Hiring company name |
+| `job_title` | Role/position title |
+| `status` | `Applied` / `Interview` / `Offer` / `Rejected` / `needs_review` |
+| `date_applied` | ISO date of application or email |
+| `next_action` | What to do next |
+| `recruiter_name` | Recruiter/contact name |
+| `salary_range` | Compensation range if mentioned |
+| `confidence` | 0.0–1.0 confidence score |
 
-## Slack Digest Preview
+Emails with `confidence < 0.7` are automatically routed to `needs_review` instead of being auto-logged.
+
+## Daily Slack Digest
+
+The `daily_digest` workflow fires every weekday at 8am IST and sends:
 
 ```
-📋 Job Search Daily Digest
-
-Today's snapshot — Mon Apr 21 2026
-────────────────────────────────────
+📋 Job Search Daily Digest — Fri Apr 25 2026
+──────────────────────────────────────────────
 📨 Applied    🎤 Interview    🎉 Offer    ❌ Rejected
     42              11            2           18
 
-📊 Response Rate    ✅ Offer Rate
-      30.9%             4.8%
-
-⚠️ 3 email(s) need manual review — check your Notion review page.
-
-Powered by Job Tracker Agent 🤖
+📊 Response Rate: 30.9%    ✅ Offer Rate: 4.8%
+⚠️  3 email(s) need manual review
 ```
 
 ## Project Structure
 
 ```
 job-tracker-agent/
-├── workflows/
-│   ├── job_tracker_main.json   # Gmail → Extract → Notion (runs every 15 min)
-│   └── daily_digest.json       # Cron → /stats → Slack (weekdays 8am)
 ├── backend/
-│   ├── main.py                 # FastAPI app, routes, DB bootstrap
-│   ├── extractor.py            # OpenAI GPT-4o structured extraction
-│   ├── notion_client.py        # Notion API upsert/review routing
-│   ├── models.py               # Pydantic v2 models
-│   ├── Dockerfile              # Python 3.11-slim image
+│   ├── main.py                 # FastAPI app — routes, DB bootstrap, lifespan
+│   ├── extractor.py            # Gemini 2.5 Flash structured extraction
+│   ├── notion_client.py        # Notion API — optional upsert/review routing
+│   ├── models.py               # Pydantic v2 data models
+│   ├── Dockerfile              # Multi-stage Python 3.11-slim image
 │   └── requirements.txt
 ├── prompts/
 │   └── extract_job_email.txt   # System prompt for email parsing
-├── screenshots/                # Add UI screenshots here
+├── workflows/
+│   ├── job_tracker_main.json   # Gmail → /extract → Notion (every 5 min)
+│   └── daily_digest.json       # Cron → /stats → Slack (8am IST weekdays)
 ├── docker-compose.yml
 ├── .env.example
 ├── Makefile
 └── README.md
 ```
 
-## Make Commands
+## Useful Commands
 
-| Command | Description |
-|---|---|
-| `make dev` | Build and start all services in detached mode |
-| `make down` | Stop all services |
-| `make logs` | Stream logs from all containers |
-| `make import-workflows` | Import workflow JSONs into n8n via API |
-| `make test` | Run tests inside the FastAPI container |
-| `make clean` | Stop services and remove all volumes |
+```bash
+# Start all services
+docker compose up -d
 
-## Screenshots
+# Rebuild after code changes
+docker compose up --build -d
 
-> Add screenshots to the `screenshots/` folder and link them here.
+# View logs
+docker compose logs -f fastapi
 
-- `screenshots/n8n_main_workflow.png` — Main workflow canvas
-- `screenshots/notion_database.png` — Notion Job Applications database
-- `screenshots/slack_digest.png` — Daily Slack digest message
-- `screenshots/fastapi_docs.png` — FastAPI `/docs` UI
+# Stop everything
+docker compose down
 
-## License
+# Stop and remove volumes (full reset)
+docker compose down -v
+```
 
-MIT
+## Author
+
+**Sanidhya Singh** — AI/ML Engineer
+[GitHub](https://github.com/sanidhya-ai-ml) · [LinkedIn](https://www.linkedin.com/in/sanidhya-aiml)
